@@ -1,19 +1,29 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import Optional
 
-app = FastAPI()
+app = FastAPI(title="TaxiTranslator")
 
-# Example of a message route
-@app.post("/messages/")
-async def create_message(message: str):
-    return {"message": message}
+class CustomerMessage(BaseModel):
+    text: str
+    source_language: Optional[str] = None   # optional, we'll auto-detect later
 
-# Example of a translation route
-@app.post("/translate/")
-async def translate(text: str, target_language: str):
-    return {"translated_text": f"{text} in {target_language}"}
 
-# Example of a booking route
-@app.post("/book/")
-async def create_booking(details: dict):
-    return {"booking_details": details}
+class TranslatedResponse(BaseModel):
+    original_text: str
+    translated_to_greek: str
+    # Later we'll also add: translated_back_to_customer, original_greek_reply, etc.
+
+@app.get("/")
+def root():
+    return {"message": "TaxiTranslator backend is alive! 🚕"}
+
+@app.post("/translate", response_model=TranslatedResponse)
+async def translate_customer_message(msg: CustomerMessage):
+    # Fake translation logic (we replace this with OpenAI later)
+    fake_greek = f"[FAKE-GR] {msg.text} → γεια σου φίλε ταξιτζή"
+
+    return TranslatedResponse(
+        original_text=msg.text,
+        translated_to_greek=fake_greek
+    )
