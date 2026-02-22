@@ -4,6 +4,7 @@ from typing import Optional
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
+import json
 
 # Load secrets from .env file (very important!)
 load_dotenv()
@@ -52,13 +53,24 @@ async def translate_customer_message(msg: CustomerMessage):
         raise HTTPException(status_code=400, detail="Message text cannot be empty")
 
     try:
-        # Prepare a clear prompt for OpenAI
+        # Better prompt that asks for BOTH detection and translation
         prompt = f"""
-        Translate the following customer message to natural, polite, everyday Greek.
-        Use language suitable for a taxi driver.
-        Return **only** the Greek translation — no explanations, no quotes, nothing else.
+        1. Detect the language of the following message.
+        2. Translate it to natural, polite, everyday Greek (suitable for a taxi driver).
+        
+        Rules:
+        - Return a JSON object only — nothing else before or after.
+        - Use language codes like "en", "fr", "de", "es", "it", "ru", etc.
+        - If you cannot detect the language confidently, use "unknown".
+        - Make the Greek translation friendly and clear.
 
         Message: {msg.text}
+
+        Example output format (return exactly this structure):
+        {{
+          "detected_language": "en",
+          "translated_to_greek": "Γεια σου, χρειάζομαι ταξί στο αεροδρόμιο."
+        }}
         """
 
         response = client.chat.completions.create(
