@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 import json
-from .models import engine, Base, SessionLocal   # this triggers the DB creation
+from .models import engine, Base, SessionLocal, Driver  # this triggers the DB creation
 
 # ── Load environment variables from .env file ────────────────────────────────
 load_dotenv()
@@ -43,6 +43,10 @@ class DriverTranslatedResponse(BaseModel):
     original_greek: str
     translated_to_customer: str
     customer_language: str
+
+class DriverRegister(BaseModel):
+    whatsapp_number: str
+    email: str
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -177,3 +181,51 @@ async def translate_driver_reply(msg: DriverMessage):
         if "api_key" in error_msg.lower():
             raise HTTPException(status_code=500, detail="OpenAI API key issue — check .env")
         raise HTTPException(status_code=500, detail=f"Translation failed: {error_msg}")
+    
+
+@app.post("/register-driver")
+async def register_driver(driver: DriverRegister):
+    """
+    Register a new driver with their WhatsApp number and email.
+    This will allow us to store their calendar token later.
+    """
+    if not driver.whatsapp_number.strip() or not driver.email.strip():
+        raise HTTPException(status_code=400, detail="Both whatsapp_number and email are required")
+
+    db = SessionLocal()
+    try:
+        # Check for existing driver
+        existing = db.query(Driver).filter(Driver.whatsapp_number == driver.whatsapp_number).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="This WhatsApp number is already registered")
+
+        # Create and save new driver
+        new_driver = Driver(
+            whatsapp_number=driver.whatsapp_number,
+            email=driver.email,
+            calendar_token=""  # empty until linked
+        )
+
+        db.add(new_driver)
+        db.commit()
+        db.refresh(new_driver)  # get the auto-generated ID
+
+        return {
+            "message": "Driver registered successfully",
+            "driver_id": new_driver.id,
+            "whatsapp_number": new_driver.whatsapp_number,
+            "email": new_driver.email
+        }
+
+    except HTTPException as http_exc:
+        db.rollback()
+        raise http_exc
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
+    finally:
+        db.close()    
+    
+    
