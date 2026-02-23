@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import json
 from .models import engine, Base, SessionLocal, Driver  # this triggers the DB creation
+from google_auth_oauthlib.flow import InstalledAppFlow
+
 
 # ── Load environment variables from .env file ────────────────────────────────
 load_dotenv()
@@ -246,5 +248,34 @@ async def list_drivers():
             }
             for driver in drivers
         ]
+    finally:
+        db.close()
+
+@app.get("/link-calendar/{driver_id}")
+async def link_calendar(driver_id: int):
+    """
+    Link a driver's Google Calendar using OAuth.
+    Opens a browser tab for the driver to log in and grant access.
+    Saves the token in the database for future event creation.
+    """
+    db = SessionLocal()
+    try:
+        driver = db.query(Driver).filter(Driver.id == driver_id).first()
+        if not driver:
+            raise HTTPException(status_code=404, detail="Driver not found")
+
+        # Start OAuth flow
+        flow = InstalledAppFlow.from_client_secrets_file(
+            'client_secrets.json',  # your downloaded JSON file from Google Console
+            scopes=['https://www.googleapis.com/auth/calendar.events']
+        )
+        creds = flow.run_local_server(port=0)  # opens browser for login
+
+        # Save token to database
+        driver.calendar_token = creds.to_json()
+        db.commit()
+
+        return {"message": "Calendar linked successfully for driver ID {driver_id}"}
+
     finally:
         db.close()
