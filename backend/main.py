@@ -228,4 +228,23 @@ async def register_driver(driver: DriverRegister):
     finally:
         db.close()    
     
-    
+@app.get("/drivers")
+async def list_drivers():
+    """
+    List all registered drivers (for testing/debugging).
+    Returns their ID, WhatsApp number, and email.
+    """
+    db = SessionLocal()
+    try:
+        drivers = db.query(Driver).all()
+        return [
+            {
+                "id": driver.id,
+                "whatsapp_number": driver.whatsapp_number,
+                "email": driver.email,
+                "has_calendar_linked": bool(driver.calendar_token)  # True if token is not empty
+            }
+            for driver in drivers
+        ]
+    finally:
+        db.close()
