@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 import json
+from .models import engine, Base, SessionLocal   # this triggers the DB creation
 
 # ── Load environment variables from .env file ────────────────────────────────
 load_dotenv()
@@ -30,7 +31,7 @@ class CustomerMessage(BaseModel):
 class TranslatedResponse(BaseModel):
     original_text: str
     translated_to_greek: str
-    detected_language: Optional[str] = None
+    detected_language: str                  # now always filled by OpenAI
 
 
 class DriverMessage(BaseModel):
@@ -69,10 +70,10 @@ async def translate_customer_message(msg: CustomerMessage):
         prompt = f"""
         1. Detect the language of the following message.
         2. Translate it to natural, polite, everyday Greek (suitable for a taxi driver).
-        
+
         Rules:
         - Return ONLY a valid JSON object — nothing else.
-        - Use standard language codes: "en", "fr", "de", "es", "it", "ru", etc.
+        - Use standard ISO 639-1 language codes: "en", "fr", "de", "es", "it", "ru", etc.
         - If detection is uncertain → use "unknown"
         - Greek translation should be friendly and clear.
 
@@ -91,19 +92,17 @@ async def translate_customer_message(msg: CustomerMessage):
                 {"role": "system", "content": "You are a precise translator and language detector. Respond only with valid JSON."},
                 {"role": "user",   "content": prompt}
             ],
-            temperature=0.2,
-            max_tokens=200
+            temperature=0.15,
+            max_tokens=250
         )
 
         raw_content = response.choices[0].message.content.strip()
 
-        # Try to parse OpenAI's response as JSON
         try:
             result = json.loads(raw_content)
             detected_lang = result.get("detected_language", "unknown")
             greek_text = result.get("translated_to_greek", "[Translation failed]")
         except json.JSONDecodeError:
-            # Fallback if OpenAI didn't return clean JSON
             detected_lang = "unknown"
             greek_text = raw_content
 
@@ -123,14 +122,14 @@ async def translate_customer_message(msg: CustomerMessage):
 @app.post("/translate-driver", response_model=DriverTranslatedResponse)
 async def translate_driver_reply(msg: DriverMessage):
     """
-    Driver (Greek) → Customer original language
-    Needs to know the customer's language to translate back correctly
+    Driver (Greek) → back to customer's original language
+    Uses the language code that came from the first /translate call
     """
     if not msg.text.strip():
         raise HTTPException(status_code=400, detail="Message text cannot be empty")
 
     if not msg.customer_language:
-        raise HTTPException(status_code=400, detail="customer_language is required (e.g. 'en', 'fr')")
+        raise HTTPException(status_code=400, detail="customer_language is required (e.g. 'en', 'fr', 'de')")
 
     try:
         prompt = f"""
