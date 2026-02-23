@@ -15,6 +15,13 @@ load_dotenv()
 # Create OpenAI client using the key from .env
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Simple in-memory storage for chat context (per driver)
+# Key = driver_id (int), Value = dict with language and original text
+# chat_memory = {}  # Example: {1: {"language": "en", "original_text": "I need a taxi"}}
+# Simple memory: remembers customer's language per driver
+# Key = driver_id (int), Value = customer's language code (e.g. "fr")
+driver_language_memory = {}
+
 # ── Create the FastAPI application ───────────────────────────────────────────
 app = FastAPI(
     title="TaxiTranslator API",
@@ -26,8 +33,9 @@ app = FastAPI(
 # ── Data models ────────────────────────────────────────────────────────────────
 
 class CustomerMessage(BaseModel):
+    driver_id: int                  # Required — links message to driver
     text: str
-    source_language: Optional[str] = None   # optional – OpenAI can detect it
+    source_language: Optional[str] = None # optional – OpenAI can detect it
 
 
 class TranslatedResponse(BaseModel):
@@ -37,9 +45,9 @@ class TranslatedResponse(BaseModel):
 
 
 class DriverMessage(BaseModel):
-    text: str                      # Greek message from the driver
-    customer_language: str         # e.g. "en", "fr", "de" – required
-
+    driver_id: int                  # Required — same driver
+    text: str
+    customer_language: Optional[str] = None  # Optional now — try to remember it
 
 class DriverTranslatedResponse(BaseModel):
     original_greek: str
@@ -67,7 +75,7 @@ async def root():
 async def translate_customer_message(msg: CustomerMessage):
     """
     Customer (any language) → Greek
-    Automatically detects language and translates to polite Greek
+    Saves detected language to memory for future replies
     """
     if not msg.text.strip():
         raise HTTPException(status_code=400, detail="Message text cannot be empty")
@@ -76,7 +84,7 @@ async def translate_customer_message(msg: CustomerMessage):
         prompt = f"""
         1. Detect the language of the following message.
         2. Translate it to natural, polite, everyday Greek (suitable for a taxi driver).
-
+        
         Rules:
         - Return ONLY a valid JSON object — nothing else.
         - Use standard ISO 639-1 language codes: "en", "fr", "de", "es", "it", "ru", etc.
@@ -85,7 +93,7 @@ async def translate_customer_message(msg: CustomerMessage):
 
         Message: {msg.text}
 
-        Example output (return exactly this format):
+        Example output:
         {{
           "detected_language": "en",
           "translated_to_greek": "Γεια σου, χρειάζομαι ταξί στο αεροδρόμιο."
@@ -112,6 +120,9 @@ async def translate_customer_message(msg: CustomerMessage):
             detected_lang = "unknown"
             greek_text = raw_content
 
+        # Save detected language to memory for this driver
+        driver_language_memory[msg.driver_id] = detected_lang
+
         return TranslatedResponse(
             original_text=msg.text,
             translated_to_greek=greek_text,
@@ -123,23 +134,33 @@ async def translate_customer_message(msg: CustomerMessage):
         if "api_key" in error_msg.lower() or "invalid" in error_msg.lower():
             raise HTTPException(status_code=500, detail="OpenAI API key missing or invalid. Check .env file.")
         raise HTTPException(status_code=500, detail=f"Translation failed: {error_msg}")
+    
 
 
 @app.post("/translate-driver", response_model=DriverTranslatedResponse)
 async def translate_driver_reply(msg: DriverMessage):
     """
     Driver (Greek) → back to customer's original language
-    Uses the language code that came from the first /translate call
+    Automatically uses remembered language from previous customer message
     """
     if not msg.text.strip():
         raise HTTPException(status_code=400, detail="Message text cannot be empty")
 
-    if not msg.customer_language:
-        raise HTTPException(status_code=400, detail="customer_language is required (e.g. 'en', 'fr', 'de')")
+    # Load remembered language for this driver
+    remembered_lang = driver_language_memory.get(msg.driver_id)
+
+    # Use remembered language if available, otherwise require it
+    customer_language = remembered_lang or msg.customer_language
+
+    if not customer_language:
+        raise HTTPException(
+            status_code=400,
+            detail="customer_language required (or send a customer message first with driver_id to detect it)"
+        )
 
     try:
         prompt = f"""
-        Translate the following Greek message to natural, polite {msg.customer_language}.
+        Translate the following Greek message to natural, polite {customer_language}.
         Use everyday language suitable for a taxi customer.
         Return ONLY a valid JSON object — nothing else.
 
@@ -175,7 +196,7 @@ async def translate_driver_reply(msg: DriverMessage):
         return DriverTranslatedResponse(
             original_greek=original_greek,
             translated_to_customer=translated_text,
-            customer_language=msg.customer_language
+            customer_language=customer_language
         )
 
     except Exception as e:
@@ -183,7 +204,7 @@ async def translate_driver_reply(msg: DriverMessage):
         if "api_key" in error_msg.lower():
             raise HTTPException(status_code=500, detail="OpenAI API key issue — check .env")
         raise HTTPException(status_code=500, detail=f"Translation failed: {error_msg}")
-    
+        
 
 @app.post("/register-driver")
 async def register_driver(driver: DriverRegister):
@@ -253,29 +274,86 @@ async def list_drivers():
 
 @app.get("/link-calendar/{driver_id}")
 async def link_calendar(driver_id: int):
-    """
-    Link a driver's Google Calendar using OAuth.
-    Opens a browser tab for the driver to log in and grant access.
-    Saves the token in the database for future event creation.
-    """
     db = SessionLocal()
     try:
         driver = db.query(Driver).filter(Driver.id == driver_id).first()
         if not driver:
             raise HTTPException(status_code=404, detail="Driver not found")
 
-        # Start OAuth flow
+        # 1. Setup the flow
         flow = InstalledAppFlow.from_client_secrets_file(
-            'client_secrets.json',  # your downloaded JSON file from Google Console
+            'client_secrets.json',
             scopes=['https://www.googleapis.com/auth/calendar.events']
         )
-        creds = flow.run_local_server(port=0)  # opens browser for login
 
-        # Save token to database
+        # 2. Explicitly tell the local server to use port 8080
+        # The library will try to open http://localhost:8080/
+        creds = flow.run_local_server(
+            port=8080, 
+            prompt='consent',
+            authorization_prompt_message=''
+        ) 
+
+        # 3. Save token
         driver.calendar_token = creds.to_json()
         db.commit()
+        
+        return {"message": f"Success! Calendar linked for driver {driver_id}."}
+        
+    except Exception as e:
+        # It's helpful to see the full error in your console during dev
+        print(f"Error occurred: {e}")
+        return {"error": str(e)}
+    finally:
+        db.close()
 
-        return {"message": "Calendar linked successfully for driver ID {driver_id}"}
+
+
+# This endpoint is for testing the WhatsApp simulation without needing the actual WhatsApp integration.
+
+class WhatsAppSimulation(BaseModel):
+    from_number: str          # driver's WhatsApp number
+    text: str                 # customer's message
+    is_reply: bool = False    # True if this is driver's reply
+
+@app.post("/simulate-whatsapp")
+async def simulate_whatsapp(msg: WhatsAppSimulation):
+    """
+    Simulate a WhatsApp message coming from a customer to a driver.
+    Finds the driver by WhatsApp number and translates accordingly.
+    """
+    db = SessionLocal()
+    try:
+        # Find the driver by their WhatsApp number
+        driver = db.query(Driver).filter(Driver.whatsapp_number == msg.from_number).first()
+        if not driver:
+            raise HTTPException(status_code=404, detail="No driver registered with this WhatsApp number")
+
+        if not msg.is_reply:
+            # Customer → Greek (normal message)
+            translation = await translate_customer_message(CustomerMessage(text=msg.text))
+            return {
+                "driver_id": driver.id,
+                "driver_whatsapp": driver.whatsapp_number,
+                "original_customer_text": msg.text,
+                "translated_to_greek": translation.translated_to_greek,
+                "detected_language": translation.detected_language,
+                "next_step": "Copy the translated_to_greek and send to customer chat in WhatsApp"
+            }
+        else:
+            # Driver reply (Greek → customer's language)
+            # For now we require customer_language — later we can remember it
+            customer_language = "en"  # ← hard-coded for test; improve later
+            reply_translation = await translate_driver_reply(
+                DriverMessage(text=msg.text, customer_language=customer_language)
+            )
+            return {
+                "driver_id": driver.id,
+                "original_greek_reply": msg.text,
+                "translated_to_customer": reply_translation.translated_to_customer,
+                "customer_language_used": customer_language,
+                "next_step": "Copy translated_to_customer and send back to customer in WhatsApp"
+            }
 
     finally:
         db.close()
